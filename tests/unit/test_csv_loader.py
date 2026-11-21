@@ -61,3 +61,36 @@ def test_csv_with_headers_only_raises_error(tmp_path):
 
     with pytest.raises(ValueError, match="no data rows"):
         load_csv(csv_file)
+
+
+def test_load_csv_row_limit_is_enforced(tmp_path):
+    file = tmp_path / "customers.csv"
+    file.write_text(
+        "id,name\n1,John\n2,Jane\n3,Alex\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="row limit"):
+        load_csv(file, max_rows=2)
+
+
+def test_load_csv_column_limit_is_enforced(tmp_path):
+    file = tmp_path / "customers.csv"
+    file.write_text(
+        "id,name,age\n1,John,25\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="column limit"):
+        load_csv(file, max_columns=2)
+
+
+def test_load_csv_field_length_limit_is_enforced(tmp_path):
+    file = tmp_path / "customers.csv"
+    file.write_text(
+        "id,name\n1,Alexander\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="field exceeding"):
+        load_csv(file, max_field_length=5)

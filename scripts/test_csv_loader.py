@@ -1,8 +1,6 @@
-
 from pathlib import Path
 
 from evolyrn.data.ingestion.csv_loader import load_csv
-
 
 # Locate the sample dataset from the project root
 dataset_path = Path("examples/sample_customers.csv")
