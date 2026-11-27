@@ -56,12 +56,9 @@ class CleaningResult:
     report: CleaningReport
 
 
-def clean_dataset(
-    dataframe: pd.DataFrame,
-    rules: CleaningRules | None = None,
-) -> CleaningResult:
+class DataCleaner:
     """
-    Clean a Pandas DataFrame using configurable strategies.
+    Reusable dataset cleaning engine.
 
     Supported missing-value strategies:
     - mean
@@ -70,26 +67,15 @@ def clean_dataset(
     - constant
     - drop_rows
 
+    Workflow:
+    - fit(): Learn cleaning parameters.
+    - transform(): Apply learned parameters.
+    - fit_transform(): Learn and apply parameters.
+
     The original DataFrame is never modified.
     """
 
-    # Validate input DataFrame.
-    if not isinstance(dataframe, pd.DataFrame):
-        raise TypeError("Expected a Pandas DataFrame.")
-
-    # Apply default configuration.
-    if rules is None:
-        rules = CleaningRules()
-
-    if not isinstance(rules, CleaningRules):
-        raise TypeError("Expected CleaningRules configuration.")
-
-    if rules.duplicate_keep not in ("first", "last"):
-        raise ValueError(
-            "duplicate_keep must be either 'first' or 'last'."
-        )
-
-    valid_strategies = {
+    VALID_STRATEGIES = {
         "mean",
         "median",
         "mode",
@@ -97,133 +83,294 @@ def clean_dataset(
         "drop_rows",
     }
 
-    # Validate cleaning configurations.
-    for column, strategy in rules.missing_value_strategies.items():
+    def __init__(
+        self,
+        rules: CleaningRules | None = None,
+    ):
+        if rules is None:
+            rules = CleaningRules()
 
-        if column not in dataframe.columns:
-            raise ValueError(
-                f"Cleaning rule references unknown column '{column}'."
+        if not isinstance(rules, CleaningRules):
+            raise TypeError(
+                "Expected CleaningRules configuration."
             )
 
-        if strategy not in valid_strategies:
-            raise ValueError(
-                f"Unsupported cleaning strategy '{strategy}'."
+        self.rules = rules
+
+        self._is_fitted = False
+        self._columns = []
+        self._learned_parameters = {}
+
+    def _validate_dataframe(
+        self,
+        dataframe: pd.DataFrame,
+    ) -> None:
+        """Validate input DataFrame."""
+
+        if not isinstance(dataframe, pd.DataFrame):
+            raise TypeError(
+                "Expected a Pandas DataFrame."
             )
 
-        if strategy in ("mean", "median"):
+        if not dataframe.columns.is_unique:
+            raise ValueError(
+                "DataFrame must have unique column names."
+            )
 
-            if dataframe[column].isna().all():
-                raise ValueError(
-                    f"Cannot calculate {strategy} for column '{column}' "
-                    "because all values are missing."
-                )
+    def _validate_rules(
+        self,
+        dataframe: pd.DataFrame,
+    ) -> None:
+        """Validate cleaning configuration."""
 
-            if not is_numeric_dtype(dataframe[column]):
-                raise TypeError(
-                    f"Strategy '{strategy}' requires a numeric column: '{column}'."
-                )
-
-        if (
-            strategy == "constant"
-            and column not in rules.fill_values
+        if self.rules.duplicate_keep not in (
+            "first",
+            "last",
         ):
             raise ValueError(
-                f"Constant fill value not provided for '{column}'."
+                "duplicate_keep must be either 'first' or 'last'."
             )
 
-    # Capture original dataset statistics.
-    original_row_count = len(dataframe)
+        for column, strategy in (
+            self.rules.missing_value_strategies.items()
+        ):
 
-    missing_before = {
-        column: int(count)
-        for column, count in dataframe.isna().sum().items()
-        if count > 0
-    }
-
-    duplicate_count_before = int(
-        dataframe.duplicated().sum()
-    )
-
-    # Create an independent copy.
-    cleaned = dataframe.copy(deep=True)
-
-    # Handle missing values.
-    for column, strategy in rules.missing_value_strategies.items():
-
-        if strategy == "mean":
-
-            value = cleaned[column].mean()
-            cleaned[column] = cleaned[column].fillna(value)
-
-        elif strategy == "median":
-
-            value = cleaned[column].median()
-            cleaned[column] = cleaned[column].fillna(value)
-
-        elif strategy == "mode":
-
-            modes = cleaned[column].mode()
-
-            if modes.empty:
+            if column not in dataframe.columns:
                 raise ValueError(
-                    f"Cannot calculate mode for column '{column}'."
+                    f"Cleaning rule references unknown "
+                    f"column '{column}'."
                 )
 
-            cleaned[column] = cleaned[column].fillna(
-                modes.iloc[0]
+            if strategy not in self.VALID_STRATEGIES:
+                raise ValueError(
+                    f"Unsupported cleaning strategy '{strategy}'."
+                )
+
+            if strategy in ("mean", "median"):
+
+                if dataframe[column].isna().all():
+                    raise ValueError(
+                        f"Cannot calculate {strategy} for "
+                        f"column '{column}' because all "
+                        "values are missing."
+                    )
+
+                if not is_numeric_dtype(dataframe[column]):
+                    raise TypeError(
+                        f"Strategy '{strategy}' requires "
+                        f"a numeric column: '{column}'."
+                    )
+
+            if (
+                strategy == "constant"
+                and column not in self.rules.fill_values
+            ):
+                raise ValueError(
+                    f"Constant fill value not provided "
+                    f"for '{column}'."
+                )
+
+    def fit(
+        self,
+        dataframe: pd.DataFrame,
+    ) -> "DataCleaner":
+        """
+        Learn cleaning parameters from training data.
+        """
+
+        self._validate_dataframe(dataframe)
+        self._validate_rules(dataframe)
+
+        learned_parameters = {}
+
+        for column, strategy in (
+            self.rules.missing_value_strategies.items()
+        ):
+
+            if strategy == "mean":
+                value = float(
+                    dataframe[column].mean()
+                )
+
+            elif strategy == "median":
+                value = float(
+                    dataframe[column].median()
+                )
+
+            elif strategy == "mode":
+
+                modes = dataframe[column].mode()
+
+                if modes.empty:
+                    raise ValueError(
+                        f"Cannot calculate mode for "
+                        f"column '{column}'."
+                    )
+
+                value = modes.iloc[0]
+
+            elif strategy == "constant":
+                value = self.rules.fill_values[column]
+
+            else:
+                value = None
+
+            # Convert NumPy scalar values into
+            # native Python values for serialization.
+            if hasattr(value, "item"):
+                value = value.item()
+
+            learned_parameters[column] = {
+                "strategy": strategy,
+                "value": value,
+            }
+
+        # Save state only after successful fitting.
+        self._columns = list(dataframe.columns)
+        self._learned_parameters = learned_parameters
+        self._is_fitted = True
+
+        return self
+
+    def transform(
+        self,
+        dataframe: pd.DataFrame,
+    ) -> CleaningResult:
+        """
+        Apply previously learned cleaning parameters.
+        """
+
+        self._validate_dataframe(dataframe)
+
+        if not self._is_fitted:
+            raise RuntimeError(
+                "DataCleaner must be fitted before transformation."
             )
 
-        elif strategy == "constant":
-
-            cleaned[column] = cleaned[column].fillna(
-                rules.fill_values[column]
+        if list(dataframe.columns) != self._columns:
+            raise ValueError(
+                "Input columns must match the fitted "
+                "training DataFrame columns and order."
             )
 
-        elif strategy == "drop_rows":
+        original_row_count = len(dataframe)
 
-            cleaned = cleaned.dropna(
-                subset=[column]
-            )
+        missing_before = {
+            column: int(count)
+            for column, count in dataframe.isna().sum().items()
+            if count > 0
+        }
 
-    # Calculate rows removed due to missing values.
-    rows_removed_missing = (
-        original_row_count - len(cleaned)
-    )
-
-    # Capture row count before duplicate removal.
-    rows_before_duplicate_removal = len(cleaned)
-
-    # Remove duplicate records.
-    if rules.remove_duplicates:
-
-        cleaned = cleaned.drop_duplicates(
-            keep=rules.duplicate_keep
+        duplicate_count_before = int(
+            dataframe.duplicated().sum()
         )
 
-    # Calculate actual duplicate removals.
-    duplicates_removed = (
-        rows_before_duplicate_removal - len(cleaned)
-    )
+        # Work on an independent copy.
+        cleaned = dataframe.copy(deep=True)
 
-    # Capture remaining missing values.
-    missing_after = {
-        column: int(count)
-        for column, count in cleaned.isna().sum().items()
-        if count > 0
-    }
+        # Apply learned cleaning parameters.
+        for column, parameters in (
+            self._learned_parameters.items()
+        ):
 
-    # Generate cleaning report.
-    report = CleaningReport(
-        original_row_count=original_row_count,
-        final_row_count=len(cleaned),
-        missing_values_before=missing_before,
-        missing_values_after=missing_after,
-        duplicate_rows_before=duplicate_count_before,
-        duplicates_removed=duplicates_removed,
-        rows_removed_missing=rows_removed_missing,
-    )
+            strategy = parameters["strategy"]
+            value = parameters["value"]
 
-    return CleaningResult(
-        dataframe=cleaned,
-        report=report,
-    )
+            if strategy in (
+                "mean",
+                "median",
+                "mode",
+                "constant",
+            ):
+                cleaned[column] = cleaned[column].fillna(
+                    value
+                )
+
+            elif strategy == "drop_rows":
+                cleaned = cleaned.dropna(
+                    subset=[column]
+                )
+
+        rows_removed_missing = (
+            original_row_count - len(cleaned)
+        )
+
+        rows_before_duplicate_removal = len(cleaned)
+
+        # Apply duplicate removal.
+        if self.rules.remove_duplicates:
+
+            cleaned = cleaned.drop_duplicates(
+                keep=self.rules.duplicate_keep
+            )
+
+        duplicates_removed = (
+            rows_before_duplicate_removal - len(cleaned)
+        )
+
+        missing_after = {
+            column: int(count)
+            for column, count in cleaned.isna().sum().items()
+            if count > 0
+        }
+
+        report = CleaningReport(
+            original_row_count=original_row_count,
+            final_row_count=len(cleaned),
+            missing_values_before=missing_before,
+            missing_values_after=missing_after,
+            duplicate_rows_before=duplicate_count_before,
+            duplicates_removed=duplicates_removed,
+            rows_removed_missing=rows_removed_missing,
+        )
+
+        return CleaningResult(
+            dataframe=cleaned,
+            report=report,
+        )
+
+    def fit_transform(
+        self,
+        dataframe: pd.DataFrame,
+    ) -> CleaningResult:
+        """
+        Learn cleaning parameters and transform training data.
+        """
+
+        self.fit(dataframe)
+
+        return self.transform(dataframe)
+
+    def get_state(self) -> dict:
+        """
+        Return a copy of the learned cleaning state.
+        """
+
+        if not self._is_fitted:
+            raise RuntimeError(
+                "DataCleaner must be fitted before retrieving state."
+            )
+
+        return {
+            "columns": list(self._columns),
+            "learned_parameters": {
+                column: parameters.copy()
+                for column, parameters
+                in self._learned_parameters.items()
+            },
+        }
+
+
+def clean_dataset(
+    dataframe: pd.DataFrame,
+    rules: CleaningRules | None = None,
+) -> CleaningResult:
+    """
+    Backward-compatible cleaning function.
+
+    Uses DataCleaner internally.
+    """
+
+    cleaner = DataCleaner(rules)
+
+    return cleaner.fit_transform(dataframe)

@@ -4,8 +4,14 @@ import pytest
 
 from evolyrn.data.preprocessing.data_cleaner import (
     CleaningRules,
+    DataCleaner,
     clean_dataset,
 )
+
+
+# ============================================================
+# EXISTING DATA CLEANING TESTS
+# ============================================================
 
 
 def test_mean_imputation():
@@ -162,7 +168,9 @@ def test_cleaning_report():
     assert result.report.missing_values_after == {}
 
 
-# Additional edge-case tests
+# ============================================================
+# EXISTING EDGE-CASE TESTS
+# ============================================================
 
 
 def test_mean_imputation_all_values_missing():
@@ -241,3 +249,160 @@ def test_duplicate_removal_disabled():
     assert len(result.dataframe) == 2
     assert result.report.duplicates_removed == 0
 
+
+# ============================================================
+# REUSABLE PREPROCESSING LIFECYCLE TESTS
+# ============================================================
+
+
+def test_cleaner_fit_learns_parameters():
+    train = pd.DataFrame({
+        "age": [20, 25, 30, 35, None],
+        "salary": [20000, 30000, 40000, 50000, 60000],
+    })
+
+    rules = CleaningRules(
+        missing_value_strategies={
+            "age": "median",
+            "salary": "mean",
+        },
+        remove_duplicates=False,
+    )
+
+    cleaner = DataCleaner(rules)
+    cleaner.fit(train)
+
+    state = cleaner.get_state()
+
+    assert state["learned_parameters"]["age"]["value"] == 27.5
+    assert state["learned_parameters"]["salary"]["value"] == 40000.0
+
+
+def test_cleaner_transform_reuses_training_parameters():
+    train = pd.DataFrame({
+        "age": [20, 25, 30, 35, None],
+        "salary": [20000, 30000, 40000, 50000, 60000],
+    })
+
+    validation = pd.DataFrame({
+        "age": [None, 40],
+        "salary": [None, 70000],
+    })
+
+    rules = CleaningRules(
+        missing_value_strategies={
+            "age": "median",
+            "salary": "mean",
+        },
+        remove_duplicates=False,
+    )
+
+    cleaner = DataCleaner(rules)
+    cleaner.fit(train)
+
+    result = cleaner.transform(validation)
+
+    assert result.dataframe.loc[0, "age"] == 27.5
+    assert result.dataframe.loc[0, "salary"] == 40000.0
+
+
+def test_cleaner_transform_before_fit_raises_error():
+    df = pd.DataFrame({
+        "age": [20, None, 30],
+    })
+
+    cleaner = DataCleaner(
+        CleaningRules(
+            missing_value_strategies={
+                "age": "median",
+            }
+        )
+    )
+
+    with pytest.raises(RuntimeError):
+        cleaner.transform(df)
+
+
+def test_cleaner_rejects_different_column_order():
+    train = pd.DataFrame({
+        "age": [20, 30, 40],
+        "salary": [20000, 30000, 40000],
+    })
+
+    validation = pd.DataFrame({
+        "salary": [50000],
+        "age": [35],
+    })
+
+    cleaner = DataCleaner(
+        CleaningRules(
+            missing_value_strategies={
+                "age": "median",
+            }
+        )
+    )
+
+    cleaner.fit(train)
+
+    with pytest.raises(ValueError):
+        cleaner.transform(validation)
+
+
+def test_cleaner_get_state_before_fit_raises_error():
+    cleaner = DataCleaner()
+
+    with pytest.raises(RuntimeError):
+        cleaner.get_state()
+
+
+def test_cleaner_fit_transform():
+    df = pd.DataFrame({
+        "age": [20, 30, None, 40],
+    })
+
+    cleaner = DataCleaner(
+        CleaningRules(
+            missing_value_strategies={
+                "age": "mean",
+            },
+            remove_duplicates=False,
+        )
+    )
+
+    result = cleaner.fit_transform(df)
+
+    assert result.dataframe["age"].isna().sum() == 0
+    assert result.dataframe.loc[2, "age"] == 30.0
+
+    assert (
+        cleaner.get_state()["learned_parameters"]["age"]["value"]
+        == 30.0
+    )
+
+
+def test_cleaner_does_not_modify_original_datasets():
+    train = pd.DataFrame({
+        "age": [20, 30, None, 40],
+    })
+
+    validation = pd.DataFrame({
+        "age": [None, 50],
+    })
+
+    original_train = train.copy(deep=True)
+    original_validation = validation.copy(deep=True)
+
+    cleaner = DataCleaner(
+        CleaningRules(
+            missing_value_strategies={
+                "age": "median",
+            },
+            remove_duplicates=False,
+        )
+    )
+
+    cleaner.fit_transform(train)
+    cleaner.transform(validation)
+
+    pd.testing.assert_frame_equal(train, original_train)
+    pd.testing.assert_frame_equal(validation, original_validation)
